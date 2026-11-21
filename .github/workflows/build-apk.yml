@@ -1,0 +1,53 @@
+name: Build Freshy Laundry APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-android-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Ekstrak project Freshy Laundry
+        run: unzip -o FreshyLaundry-Capacitor-Android.zip -x ".github/*"
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Add and configure Capacitor Android
+        run: |
+          npx cap add android
+          node scripts/configure-android.js
+          npx cap sync android
+
+      - name: Build Debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Rename APK output
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk FreshyLaundry-Android.apk
+
+      - name: Upload FreshyLaundry-Android.apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreshyLaundry-Android-APK
+          path: FreshyLaundry-Android.apk
+          retention-days: 30
