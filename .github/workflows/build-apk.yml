@@ -16,6 +16,19 @@ jobs:
       - name: Ekstrak project Freshy Laundry
         run: unzip -o FreshyLaundry-Capacitor-Android.zip -x ".github/*"
 
+      - name: Perbarui konfigurasi Capacitor agar tidak blank
+        run: |
+          node -e '
+          const fs = require("fs");
+          const cfg = JSON.parse(fs.readFileSync("capacitor.config.json", "utf8"));
+          delete cfg.server;
+          cfg.android = { ...(cfg.android || {}), allowMixedContent: true, backgroundColor: "#eef6ff" };
+          if (cfg.plugins && cfg.plugins.SplashScreen) {
+            cfg.plugins.SplashScreen.launchShowDuration = 1000;
+          }
+          fs.writeFileSync("capacitor.config.json", JSON.stringify(cfg, null, 2));
+          '
+
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
@@ -34,6 +47,192 @@ jobs:
         run: |
           npx cap add android
           node scripts/configure-android.js
+
+      - name: Patch WebView Loader (Anti-Blank + Chrome UA + Cookies + Progress)
+        run: |
+          node -e '
+          const fs = require("fs");
+          const p = "android/app/src/main/AndroidManifest.xml";
+          let m = fs.readFileSync(p, "utf8");
+          if (!m.includes("usesCleartextTraffic")) {
+            m = m.replace("<application", "<application\n        android:usesCleartextTraffic=\"true\"");
+            fs.writeFileSync(p, m);
+          }
+          '
+          cat << 'EOF' > android/app/src/main/java/id/biz/freshlaundry/app/MainActivity.java
+          package id.biz.freshlaundry.app;
+
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.net.Uri;
+          import android.net.http.SslError;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.webkit.CookieManager;
+          import android.webkit.GeolocationPermissions;
+          import android.webkit.SslErrorHandler;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceError;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.FrameLayout;
+          import android.widget.ProgressBar;
+          import android.widget.Toast;
+          import androidx.activity.OnBackPressedCallback;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+              private static final String TARGET_URL = "https://freshlaundry.biz.id/";
+              private long lastBackPressedTime = 0L;
+              private ProgressBar progressBar;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+
+                  WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+                  if (webView != null) {
+                      webView.setBackgroundColor(Color.parseColor("#EEF6FF"));
+                      webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
+
+                      WebSettings settings = webView.getSettings();
+                      settings.setJavaScriptEnabled(true);
+                      settings.setDomStorageEnabled(true);
+                      settings.setDatabaseEnabled(true);
+                      settings.setAllowFileAccess(true);
+                      settings.setAllowContentAccess(true);
+                      settings.setGeolocationEnabled(true);
+                      settings.setUseWideViewPort(true);
+                      settings.setLoadWithOverviewMode(true);
+                      settings.setSupportZoom(false);
+                      settings.setBuiltInZoomControls(false);
+                      settings.setDisplayZoomControls(false);
+                      settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+
+                      String ua = settings.getUserAgentString();
+                      if (ua != null) {
+                          settings.setUserAgentString(
+                              ua.replace("; wv)", ")").replace("Version/4.0 ", "")
+                          );
+                      }
+
+                      CookieManager cm = CookieManager.getInstance();
+                      cm.setAcceptCookie(true);
+                      cm.setAcceptThirdPartyCookies(webView, true);
+
+                      progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                      progressBar.setMax(100);
+                      FrameLayout root = findViewById(android.R.id.content);
+                      if (root != null) {
+                          FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT, 12, Gravity.TOP
+                          );
+                          root.addView(progressBar, lp);
+                      }
+
+                      webView.setWebChromeClient(new WebChromeClient() {
+                          @Override
+                          public void onProgressChanged(WebView view, int newProgress) {
+                              if (progressBar != null) {
+                                  progressBar.setProgress(newProgress);
+                                  progressBar.setVisibility(newProgress < 100 ? View.VISIBLE : View.GONE);
+                              }
+                          }
+
+                          @Override
+                          public void onGeolocationPermissionsShowPrompt(
+                              String origin, GeolocationPermissions.Callback callback
+                          ) {
+                              callback.invoke(origin, true, false);
+                          }
+                      });
+
+                      webView.setWebViewClient(new WebViewClient() {
+                          @Override
+                          public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                              String url = request.getUrl().toString();
+                              if (url.startsWith("whatsapp:") || url.startsWith("tel:") || url.startsWith("mailto:")
+                                  || url.contains("wa.me/") || url.contains("api.whatsapp.com/")) {
+                                  try {
+                                      startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                                  } catch (Exception ignored) {}
+                                  return true;
+                              }
+                              return false;
+                          }
+
+                          @Override
+                          public void onPageFinished(WebView view, String url) {
+                              if (progressBar != null) progressBar.setVisibility(View.GONE);
+                              CookieManager.getInstance().flush();
+                          }
+
+                          @Override
+                          public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                              if (request != null && request.isForMainFrame()) {
+                                  String detail = "Tidak dapat terhubung ke server.";
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && error != null) {
+                                      detail = "Kode " + error.getErrorCode() + ": " + error.getDescription();
+                                  }
+                                  showErrorPage(view, detail);
+                              }
+                          }
+
+                          @Override
+                          public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
+                              handler.cancel();
+                              showErrorPage(view, "Sertifikat SSL ditolak (kode " + error.getPrimaryError() + ").");
+                          }
+                      });
+
+                      webView.post(() -> webView.loadUrl(TARGET_URL));
+                  }
+
+                  getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+                      @Override
+                      public void handleOnBackPressed() {
+                          WebView wv = getBridge() != null ? getBridge().getWebView() : null;
+                          if (wv != null && wv.canGoBack()) {
+                              wv.goBack();
+                              return;
+                          }
+                          long now = System.currentTimeMillis();
+                          if (now - lastBackPressedTime < 2000) {
+                              finish();
+                          } else {
+                              lastBackPressedTime = now;
+                              Toast.makeText(
+                                  MainActivity.this,
+                                  "Tekan kembali sekali lagi untuk keluar",
+                                  Toast.LENGTH_SHORT
+                              ).show();
+                          }
+                      }
+                  });
+              }
+
+              private void showErrorPage(WebView view, String reason) {
+                  String safeReason = reason == null ? "" : reason.replace("<", "&lt;").replace(">", "&gt;");
+                  String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                      + "<style>body{font-family:sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;padding:24px;"
+                      + "background:linear-gradient(140deg,#8cebe7,#8dbef6,#b1a1ed);color:#132547;text-align:center}"
+                      + ".c{background:#faffff;padding:28px 22px;border-radius:22px;max-width:360px;width:100%;box-shadow:0 14px 36px rgba(17,30,88,.2)}"
+                      + "h2{margin:0 0 8px}p{font-size:14px;color:#435777;line-height:1.5;margin:0 0 18px}"
+                      + ".err{background:#eef6ff;border-radius:10px;padding:10px;font-size:12px;color:#1646ac;margin-bottom:18px;word-break:break-word}"
+                      + "a{display:block;padding:13px;border-radius:12px;background:#1646ac;color:#fff;text-decoration:none;font-weight:700}</style></head>"
+                      + "<body><div class='c'><h2>Gagal Memuat Halaman</h2>"
+                      + "<p>Freshy Laundry belum dapat dibuka saat ini.</p>"
+                      + "<div class='err'>" + safeReason + "</div>"
+                      + "<a href='" + TARGET_URL + "'>Coba Muat Ulang</a></div></body></html>";
+                  view.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
+              }
+          }
+          EOF
           npx cap sync android
 
       - name: Build Debug APK
